@@ -198,9 +198,8 @@ static struct vmem_struct *vmem = NULL; //!< Reference to shared memory
 static int signal_number = 0;           //!< Number of signal received last
 static sem_t *local_sem; //!< OS-X Named semaphores will be stored locally due to pointer
 static int oldestFrame = -1;
-struct logevent event;
+struct logevent log;
 int clockpointer=0;
-int sharedMemoryId;
 
 int main(int argc, char **argv) {
 	struct sigaction sigact;
@@ -311,6 +310,7 @@ void sighandler(int signo) {
 ///////////////////////////////////////////////////////////////////////////////
 void vmem_init(void) {
 	int i;
+	
 	// initialisiere Shared Memory
 	int sharedMemoryId = shmget(ftok(SHMKEY, SHMPROCID), sizeof(struct vmem_struct), IPC_CREAT | 0666);
 	if (sharedMemoryId < 0) {
@@ -371,27 +371,38 @@ int find_free_frame() {
 	return freeFrame;
 }
 
-//////Zusammen Arbeit zwischen allocate_page() und update_pt() kann bestimmt besser implementiert sein 
+///////////////////////////////////////////////////////////////////////////////
 void allocate_page(void) {
 	int framenummer;
+	int alteseite;
+	int mBit;
 	
 	vmem->adm.pf_count++;
 	framenummer = find_free_frame();
-  
+	
 	// wenn alle Frames schon belegt sind, muss etwas loeschen
-	if (framenummer == VOID_IDX) {	
+	if (framenummer == VOID_IDX) {		
 		framenummer = find_remove_frame();
-	}	
+		// schreibe die Seite zurueck ins File, wenn noetig
+		alteseite = vmem->pt.framepage[framenummer];
+		mBit = vmem->pt.entries[alteseite].flags & PTF_DIRTY;
+		if (mBit == PTF_DIRTY) {
+			store_page(alteseite);
+		}
+	}
 	vmem->adm.next_alloc_idx = framenummer;
-
+	
+	// ziehe neue Seite ins Frame
 	update_pt(framenummer);
-
+	fetch_page(vmem->adm.req_pageno);
+	
 	// notiere Pagefault 
-	event.alloc_frame=vmem->adm.next_alloc_idx;
-	event.g_count=vmem->adm.g_count;
-	event.pf_count=vmem->adm.pf_count;
-	event.req_pageno=vmem->adm.req_pageno;
-	logger(event);
+	log.req_pageno=vmem->adm.req_pageno;
+	log.replaced_page=alteseite;
+	log.alloc_frame=vmem->adm.next_alloc_idx;
+	log.pf_count=vmem->adm.pf_count;
+	log.g_count=vmem->adm.g_count;
+	logger(log);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -406,27 +417,18 @@ void store_page(int pt_idx) {
 	store_page_to_pagefile(pt_idx, dataStart);
 }
 
-//////Zusammen Arbeit zwischen allocate_page() und update_pt() kann bestimmt besser implementiert sein 
+///////////////////////////////////////////////////////////////////////////////
 void update_pt(int frame) {
-	int mBit;
-	int seitenummer = vmem->adm.req_pageno;
-	// alte seite aus dem Frame loeschen
+	int neueSeite = vmem->adm.req_pageno;
 	int alteseite = vmem->pt.framepage[frame];
-	event.replaced_page=alteseite;
+	
 	if(alteseite != VOID_IDX){
 		vmem->pt.entries[alteseite].frame = VOID_IDX;
 	}
-	// schreibe die Seite zurueck ins File, wenn noetig
-	mBit = vmem->pt.entries[alteseite].flags & PTF_DIRTY;
-	if (alteseite != VOID_IDX && mBit == PTF_DIRTY) {
-		store_page(alteseite);
-		vmem->pt.entries[alteseite].flags -= PTF_DIRTY;
-	}
-	//neu seite laden
-	fetch_page(seitenummer);
-	vmem->pt.entries[seitenummer].frame = frame;
-	vmem->pt.entries[seitenummer].age=AGE_DEFAULT;
-	vmem->pt.framepage[frame] = seitenummer;
+	vmem->pt.entries[neueSeite].frame = frame;
+	vmem->pt.framepage[frame] = neueSeite;
+	vmem->pt.entries[neueSeite].flags = PTF_PRESENT;
+	vmem->pt.entries[neueSeite].age = AGE_DEFAULT;	
 }
 
 ///////////////////////////////////////////////////////////////////////////////
